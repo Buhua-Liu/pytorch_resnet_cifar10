@@ -22,7 +22,7 @@ model_names = sorted(name for name in resnet.__dict__
                      and name.startswith("resnet")
                      and callable(resnet.__dict__[name]))
 
-print(model_names)
+# print(model_names)
 
 parser = argparse.ArgumentParser(description='Proper ResNets for CIFAR10 in pytorch')
 parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
@@ -75,13 +75,15 @@ def main():
 
     local_rank = args.local_rank
     global_rank = int(os.environ['RANK'])
+    print(f"local_rank: {local_rank}, global_rank: {global_rank}")
     dist.init_process_group(backend="nccl", init_method="env://")
     torch.cuda.set_device(local_rank)
-
-    model = torch.nn.parallel.DistributedDataParallel(resnet.__dict__[args.arch](),
+    
+    model = resnet.__dict__[args.arch]()
+    model.cuda()
+    model = torch.nn.parallel.DistributedDataParallel(model,
                                                       device_ids=[local_rank],
                                                       output_device=local_rank)
-    model.cuda()
 
     # optionally resume from a checkpoint
     if args.resume:
