@@ -5,8 +5,12 @@ import time
 
 import torch
 import torch.nn as nn
-import torch.nn.parallel
 import torch.backends.cudnn as cudnn
+
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
@@ -20,12 +24,12 @@ model_names = sorted(name for name in resnet.__dict__
 
 print(model_names)
 
-parser = argparse.ArgumentParser(description='Propert ResNets for CIFAR10 in pytorch')
+parser = argparse.ArgumentParser(description='Proper ResNets for CIFAR10 in pytorch')
 parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
                     choices=model_names,
                     help='model architecture: ' + ' | '.join(model_names) +
                     ' (default: resnet32)')
-parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
+parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=200, type=int, metavar='N',
                     help='number of total epochs to run')
@@ -47,14 +51,16 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
 parser.add_argument('--pretrained', dest='pretrained', action='store_true',
                     help='use pre-trained model')
-parser.add_argument('--half', dest='half', action='store_true',
-                    help='use half-precision(16-bit) ')
+parser.add_argument('--amp', dest='amp', action='store_true',
+                    help='use automatic mixed precision (AMP) ')
 parser.add_argument('--save-dir', dest='save_dir',
                     help='The directory used to save the trained models',
                     default='save_temp', type=str)
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
+parser.add_argument('--local_rank', type=int, default=0,
+                        help='given by torch.distributed.launch')
 best_prec1 = 0
 
 
@@ -67,14 +73,21 @@ def main():
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
-    model = torch.nn.DataParallel(resnet.__dict__[args.arch]())
+    local_rank = args.local_rank
+    global_rank = int(os.environ['RANK'])
+    dist.init_process_group(backend="nccl", init_method="env://")
+    torch.cuda.set_device(local_rank)
+
+    model = torch.nn.parallel.DistributedDataParallel(resnet.__dict__[args.arch](),
+                                                      device_ids=[local_rank],
+                                                      output_device=local_rank)
     model.cuda()
 
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume)
+            checkpoint = torch.load(args.resume, map_location={'cuda:%d' % 0: 'cuda:%d' % local_rank})
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
@@ -109,9 +122,8 @@ def main():
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
 
-    if args.half:
-        model.half()
-        criterion.half()
+    if args.amp:
+        scaler = torch.cuda.amp.GradScaler()
 
     optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
@@ -145,17 +157,20 @@ def main():
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
 
-        if epoch > 0 and epoch % args.save_every == 0:
+        if global_rank == 0:
+            if epoch > 0 and epoch % args.save_every == 0:
+                print(f"Saving checkpoint at epoch {epoch}...")
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'state_dict': model.state_dict(),
+                    'best_prec1': best_prec1,
+                }, is_best, filename=os.path.join(args.save_dir, f'checkpoint_{epoch}.th'))
+
             save_checkpoint({
-                'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
-            }, is_best, filename=os.path.join(args.save_dir, 'checkpoint.th'))
-
-        save_checkpoint({
-            'state_dict': model.state_dict(),
-            'best_prec1': best_prec1,
-        }, is_best, filename=os.path.join(args.save_dir, 'model.th'))
+            }, is_best, filename=os.path.join(args.save_dir, 'model.th'))
+    dist.destroy_process_group()
 
 
 def train(train_loader, model, criterion, optimizer, epoch):
@@ -179,17 +194,31 @@ def train(train_loader, model, criterion, optimizer, epoch):
         target = target.cuda()
         input_var = input.cuda()
         target_var = target
-        if args.half:
-            input_var = input_var.half()
-
-        # compute output
-        output = model(input_var)
-        loss = criterion(output, target_var)
-
-        # compute gradient and do SGD step
+        
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+
+        if args.amp:
+            # Casts operations to mixed precision
+            with torch.cuda.amp.autocast():
+                output = model(input_var)
+                loss = criterion(output, target_var)
+            # Scales the loss, and calls backward()
+            # to create scaled gradients
+            scaler.scale(loss).backward()
+
+            # Unscales gradients and calls
+            # or skips optimizer.step()
+            scaler.step(optimizer)
+
+            # Updates the scale for next iteration
+            scaler.update()
+        else:
+            output = model(input_var)
+            loss = criterion(output, target_var)
+
+            # compute gradient and do SGD step
+            loss.backward()
+            optimizer.step()
 
         output = output.float()
         loss = loss.float()
@@ -230,8 +259,8 @@ def validate(val_loader, model, criterion):
             input_var = input.cuda()
             target_var = target.cuda()
 
-            if args.half:
-                input_var = input_var.half()
+            # if args.amp:
+            #     input_var = input_var.half()
 
             # compute output
             output = model(input_var)
