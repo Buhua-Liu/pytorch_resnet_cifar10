@@ -67,13 +67,9 @@ best_prec1 = 0
 
 
 def main():
-    global args, best_prec1, writer
+    global args, best_prec1, writer, global_rank
     args = parser.parse_args()
 
-
-    # Check the save_dir exists or not
-    if not os.path.exists(args.save_dir):
-        os.makedirs(args.save_dir)
 
     # Distributed Data Parallel training
     local_rank = args.local_rank
@@ -81,6 +77,10 @@ def main():
     print(f"local_rank: {local_rank}, global_rank: {global_rank}")
     dist.init_process_group(backend="nccl", init_method="env://")
     torch.cuda.set_device(local_rank)
+    
+    # Check the save_dir exists or not
+    if global_rank==0 and not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
     
     model = resnet.__dict__[args.arch]()
     model.cuda()
