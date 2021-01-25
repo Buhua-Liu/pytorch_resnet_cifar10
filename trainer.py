@@ -153,13 +153,14 @@ def main():
     for epoch in range(args.start_epoch, args.epochs):
 
         # train for one epoch
-        print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))
-        writer.add_scalar('learning rate', optimizer.param_groups[0]['lr'], epoch)
+        if global_rank == 0:
+            print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))
+            writer.add_scalar('learning rate', optimizer.param_groups[0]['lr'], epoch)
         train(train_loader, model, criterion, optimizer, epoch)
         lr_scheduler.step()
 
         # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion)
+        prec1 = validate(val_loader, model, criterion, epoch)
 
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
@@ -233,9 +234,10 @@ def train(train_loader, model, criterion, optimizer, epoch):
         prec1 = accuracy(output.data, target)[0]
         losses.update(loss.item(), input.size(0))
         top1.update(prec1.item(), input.size(0))
-
-        writer.add_scalar('training loss', losses.val, epoch)
-        writer.add_scalar('training accuracy', top1.val, epoch)
+        
+        if global_rank == 0:
+            writer.add_scalar('training loss', losses.val, epoch)
+            writer.add_scalar('training accuracy', top1.val, epoch)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -251,7 +253,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
                       data_time=data_time, loss=losses, top1=top1))
 
 
-def validate(val_loader, model, criterion):
+def validate(val_loader, model, criterion, epoch=None):
     """
     Run evaluation
     """
@@ -283,9 +285,10 @@ def validate(val_loader, model, criterion):
             prec1 = accuracy(output.data, target)[0]
             losses.update(loss.item(), input.size(0))
             top1.update(prec1.item(), input.size(0))
-
-            writer.add_scalar('test loss', losses.val, epoch)
-            writer.add_scalar('test accuracy', top1.val, epoch)
+            
+            if global_rank == 0:
+                writer.add_scalar('test loss', losses.val, epoch)
+                writer.add_scalar('test accuracy', top1.val, epoch)
 
             # measure elapsed time
             batch_time.update(time.time() - end)
