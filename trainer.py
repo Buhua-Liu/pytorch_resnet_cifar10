@@ -15,6 +15,8 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+from torch.utils.tensorboard import SummaryWriter
+
 import resnet
 
 model_names = sorted(name for name in resnet.__dict__
@@ -31,7 +33,7 @@ parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet32',
                     ' (default: resnet32)')
 parser.add_argument('-j', '--workers', default=8, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=200, type=int, metavar='N',
+parser.add_argument('--epochs', default=1000, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -65,7 +67,7 @@ best_prec1 = 0
 
 
 def main():
-    global args, best_prec1
+    global args, best_prec1, writer
     args = parser.parse_args()
 
 
@@ -73,6 +75,7 @@ def main():
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
+    # Distributed Data Parallel training
     local_rank = args.local_rank
     global_rank = int(os.environ['RANK'])
     print(f"local_rank: {local_rank}, global_rank: {global_rank}")
@@ -89,7 +92,7 @@ def main():
     if args.resume:
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location={'cuda:%d' % 0: 'cuda:%d' % local_rank})
+            checkpoint = torch.load(args.resume, map_location={'cuda:0' : 'cuda:%d' % local_rank})
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
@@ -145,10 +148,13 @@ def main():
         validate(val_loader, model, criterion)
         return
 
+    writer = SummaryWriter('runs/' + args.arch)
+
     for epoch in range(args.start_epoch, args.epochs):
 
         # train for one epoch
         print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))
+        writer.add_scalar('learning rate', optimizer.param_groups[0]['lr'], epoch)
         train(train_loader, model, criterion, optimizer, epoch)
         lr_scheduler.step()
 
@@ -159,19 +165,18 @@ def main():
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
 
-        if global_rank == 0:
-            if epoch > 0 and epoch % args.save_every == 0:
-                print(f"Saving checkpoint at epoch {epoch}...")
-                save_checkpoint({
-                    'epoch': epoch + 1,
-                    'state_dict': model.state_dict(),
-                    'best_prec1': best_prec1,
-                }, is_best, filename=os.path.join(args.save_dir, f'checkpoint_{epoch}.th'))
-
+        if global_rank == 0 and epoch > 0 and epoch % args.save_every == 0:
+            print(f"Saving checkpoint at epoch {epoch}...")
             save_checkpoint({
+                'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
-            }, is_best, filename=os.path.join(args.save_dir, 'model.th'))
+            }, is_best, filename=os.path.join(args.save_dir, f'checkpoint_{epoch}.th'))
+
+        save_checkpoint({
+            'state_dict': model.state_dict(),
+            'best_prec1': best_prec1,
+        }, is_best, filename=os.path.join(args.save_dir, 'last_epoch.th'))
     dist.destroy_process_group()
 
 
@@ -229,11 +234,14 @@ def train(train_loader, model, criterion, optimizer, epoch):
         losses.update(loss.item(), input.size(0))
         top1.update(prec1.item(), input.size(0))
 
+        writer.add_scalar('training loss', losses.val, epoch)
+        writer.add_scalar('training accuracy', top1.val, epoch)
+
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if i % args.print_freq == 0:
+        if global_rank == 0 and i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -276,11 +284,14 @@ def validate(val_loader, model, criterion):
             losses.update(loss.item(), input.size(0))
             top1.update(prec1.item(), input.size(0))
 
+            writer.add_scalar('test loss', losses.val, epoch)
+            writer.add_scalar('test accuracy', top1.val, epoch)
+
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
 
-            if i % args.print_freq == 0:
+            if global_rank == 0 and i % args.print_freq == 0:
                 print('Test: [{0}/{1}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
@@ -298,6 +309,8 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     Save the training model
     """
     torch.save(state, filename)
+    if is_best:
+        torch.save(state, "best_" + filename)
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
