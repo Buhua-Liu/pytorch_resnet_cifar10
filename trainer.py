@@ -173,11 +173,12 @@ def main():
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
             }, is_best, filename=os.path.join(args.save_dir, f'checkpoint_{epoch}.th'))
-
-        save_checkpoint({
-            'state_dict': model.state_dict(),
-            'best_prec1': best_prec1,
-        }, is_best, filename=os.path.join(args.save_dir, 'last_epoch.th'))
+            
+        if global_rank == 0:
+            save_checkpoint({
+                'state_dict': model.state_dict(),
+                'best_prec1': best_prec1,
+            }, is_best, filename=os.path.join(args.save_dir, 'last_epoch.th'))
     dist.destroy_process_group()
 
 
@@ -313,7 +314,7 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     """
     torch.save(state, filename)
     if is_best:
-        torch.save(state, "best_" + filename)
+        torch.save(state, os.path.join(args.save_dir, 'best_checkpoint.th'))
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
