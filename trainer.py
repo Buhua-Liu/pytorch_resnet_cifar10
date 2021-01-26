@@ -148,7 +148,8 @@ def main():
         validate(val_loader, model, criterion)
         return
 
-    writer = SummaryWriter('runs/' + args.arch)
+    if global_rank==0:
+        writer = SummaryWriter('runs/' + args.arch)
 
     for epoch in range(args.start_epoch, args.epochs):
 
