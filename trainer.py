@@ -171,13 +171,13 @@ def main():
             print(f"Saving checkpoint at epoch {epoch}...")
             save_checkpoint({
                 'epoch': epoch + 1,
-                'state_dict': model.state_dict(),
+                'state_dict': model.module.state_dict(),
                 'best_prec1': best_prec1,
             }, is_best, filename=os.path.join(args.save_dir, f'checkpoint_{epoch}.th'))
             
         if global_rank == 0:
             save_checkpoint({
-                'state_dict': model.state_dict(),
+                'state_dict': model.module.state_dict(),
                 'best_prec1': best_prec1,
             }, is_best, filename=os.path.join(args.save_dir, 'last_epoch.th'))
     dist.destroy_process_group()
