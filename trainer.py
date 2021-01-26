@@ -7,10 +7,6 @@ import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 
-import torch.distributed as dist
-import torch.multiprocessing as mp
-from torch.nn.parallel import DistributedDataParallel as DDP
-
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
@@ -61,38 +57,29 @@ parser.add_argument('--save-dir', dest='save_dir',
 parser.add_argument('--save-every', dest='save_every',
                     help='Saves checkpoints at every specified number of epochs',
                     type=int, default=10)
-parser.add_argument('--local_rank', type=int, default=0,
-                        help='given by torch.distributed.launch')
+parser.add_argument('--gpu-id', default=0, type=int, help=' GPU index')
 best_prec1 = 0
 
 
 def main():
-    global args, best_prec1, writer, global_rank
+    global args, best_prec1, writer
     args = parser.parse_args()
 
 
-    # Distributed Data Parallel training
-    local_rank = args.local_rank
-    global_rank = int(os.environ['RANK'])
-    print(f"local_rank: {local_rank}, global_rank: {global_rank}")
-    dist.init_process_group(backend="nccl", init_method="env://")
-    torch.cuda.set_device(local_rank)
+    device = torch.device(f'cuda:{ars.gpu_id}' if torch.cuda.is_available() else "cpu")
     
     # Check the save_dir exists or not
-    if global_rank==0 and not os.path.exists(args.save_dir):
+    if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
     
     model = resnet.__dict__[args.arch]()
-    model.cuda()
-    model = torch.nn.parallel.DistributedDataParallel(model,
-                                                      device_ids=[local_rank],
-                                                      output_device=local_rank)
+    model.to(device)
 
     # optionally resume from a checkpoint
     if args.resume:
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location={'cuda:0' : 'cuda:%d' % local_rank})
+            checkpoint = torch.load(args.resume, map_location=device)
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
@@ -125,7 +112,7 @@ def main():
         num_workers=args.workers, pin_memory=True)
 
     # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda()
+    criterion = nn.CrossEntropyLoss()
 
     if args.amp:
         scaler = torch.cuda.amp.GradScaler()
@@ -148,15 +135,13 @@ def main():
         validate(val_loader, model, criterion)
         return
 
-    if global_rank==0:
-        writer = SummaryWriter('runs/' + args.arch)
+    writer = SummaryWriter('runs/' + args.arch)
 
     for epoch in range(args.start_epoch, args.epochs):
 
         # train for one epoch
-        if global_rank == 0:
-            print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))
-            writer.add_scalar('learning rate', optimizer.param_groups[0]['lr'], epoch)
+        print('current lr {:.5e}'.format(optimizer.param_groups[0]['lr']))
+        writer.add_scalar('learning rate', optimizer.param_groups[0]['lr'], epoch)
         train(train_loader, model, criterion, optimizer, epoch)
         lr_scheduler.step()
 
@@ -167,7 +152,7 @@ def main():
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
 
-        if global_rank == 0 and epoch > 0 and epoch % args.save_every == 0:
+        if epoch > 0 and epoch % args.save_every == 0:
             print(f"Saving checkpoint at epoch {epoch}...")
             save_checkpoint({
                 'epoch': epoch + 1,
@@ -175,12 +160,10 @@ def main():
                 'best_prec1': best_prec1,
             }, is_best, filename=os.path.join(args.save_dir, f'checkpoint_{epoch}.th'))
             
-        if global_rank == 0:
-            save_checkpoint({
+        save_checkpoint({
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
             }, is_best, filename=os.path.join(args.save_dir, 'last_epoch.th'))
-    dist.destroy_process_group()
 
 
 def train(train_loader, model, criterion, optimizer, epoch):
@@ -196,14 +179,14 @@ def train(train_loader, model, criterion, optimizer, epoch):
     model.train()
 
     end = time.time()
-    for i, (input, target) in enumerate(train_loader):
+    for i, (image, target) in enumerate(train_loader):
 
         # measure data loading time
         data_time.update(time.time() - end)
 
-        target = target.cuda()
-        input_var = input.cuda()
-        target_var = target
+        target = target.to(device)
+        input_var = image.to(device)
+        target_var = target.to(device)
         
         optimizer.zero_grad()
 
@@ -237,15 +220,15 @@ def train(train_loader, model, criterion, optimizer, epoch):
         losses.update(loss.item(), input.size(0))
         top1.update(prec1.item(), input.size(0))
         
-        if global_rank == 0:
-            writer.add_scalar('training loss', losses.val, epoch)
-            writer.add_scalar('training accuracy', top1.val, epoch)
+
+        writer.add_scalar('training loss', losses.val, epoch)
+        writer.add_scalar('training accuracy', top1.val, epoch)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if global_rank == 0 and i % args.print_freq == 0:
+        if i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
@@ -268,10 +251,10 @@ def validate(val_loader, model, criterion, epoch=None):
 
     end = time.time()
     with torch.no_grad():
-        for i, (input, target) in enumerate(val_loader):
-            target = target.cuda()
-            input_var = input.cuda()
-            target_var = target.cuda()
+        for i, (image, target) in enumerate(val_loader):
+            target = target.to(device)
+            input_var = image.to(device)
+            target_var = target.to(device)
 
             # if args.amp:
             #     input_var = input_var.half()
@@ -287,16 +270,15 @@ def validate(val_loader, model, criterion, epoch=None):
             prec1 = accuracy(output.data, target)[0]
             losses.update(loss.item(), input.size(0))
             top1.update(prec1.item(), input.size(0))
-            
-            if global_rank == 0:
-                writer.add_scalar('test loss', losses.val, epoch)
-                writer.add_scalar('test accuracy', top1.val, epoch)
+
+            writer.add_scalar('test loss', losses.val, epoch)
+            writer.add_scalar('test accuracy', top1.val, epoch)
 
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
 
-            if global_rank == 0 and i % args.print_freq == 0:
+            if i % args.print_freq == 0:
                 print('Test: [{0}/{1}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
