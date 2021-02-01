@@ -59,7 +59,7 @@ best_prec1 = 0
 
 
 def main():
-    global args, best_prec1, writer
+    global args, best_prec1, writer, device
     args = parser.parse_args()
     writer = SummaryWriter('runs/' + args.arch)
     print(args)
@@ -233,8 +233,8 @@ def train(train_loader, model, criterion, optimizer, epoch):
         loss = loss.float()
         # measure accuracy and record loss
         prec1 = accuracy(output.data, target)[0]
-        losses.update(loss.item(), input.size(0))
-        top1.update(prec1.item(), input.size(0))
+        losses.update(loss.item(), image.size(0))
+        top1.update(prec1.item(), image.size(0))
 
 
         # measure elapsed time
@@ -284,8 +284,8 @@ def validate(val_loader, model, criterion, epoch=None):
 
             # measure accuracy and record loss
             prec1 = accuracy(output.data, target)[0]
-            losses.update(loss.item(), input.size(0))
-            top1.update(prec1.item(), input.size(0))
+            losses.update(loss.item(), image.size(0))
+            top1.update(prec1.item(), image.size(0))
 
 
             # measure elapsed time
