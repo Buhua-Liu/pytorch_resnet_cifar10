@@ -165,7 +165,7 @@ def main():
                 'epoch': epoch + 1,
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
-            }, os.path.join(args.save_dir, f'best_checkpoint_{epoch+1}.th'))
+            }, os.path.join(args.save_dir, f'best_checkpoint.th'))
 
         # save checkpoint regularly
         if epoch > 0 and (epoch + 1) % args.save_every == 0:
